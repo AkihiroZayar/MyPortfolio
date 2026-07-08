@@ -331,7 +331,15 @@ footer{border-top:1px solid var(--line);padding:28px 0;color:var(--muted);font-s
    Data — defaults. Live data is stored in localStorage
    under 'ztt_portfolio' and edited via the admin panel.
 ===================================================== */
-const ADMIN_PASS = "972004";
+// Password is stored as a salted SHA-256 hash, not plain text.
+// This isn't unbreakable (nothing client-side truly is) but stops
+// casual "view source" snooping from revealing the key directly.
+const ADMIN_SALT = "byte-akihiro-salt-2026";
+const ADMIN_HASH = "29bc617bb6ba80f98c9a5d19164a4b63af7410a3a095211f5bb99daa5f64f1f5";
+async function sha256(str){
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
+  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
 const STORE_KEY = "ztt_portfolio_v2";
 
 const DEFAULT_DATA = {
@@ -452,6 +460,29 @@ function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
 function t(obj){ return (obj && typeof obj === 'object') ? (obj[lang] ?? obj.en ?? "") : (obj ?? ""); }
 function esc(s){ const d=document.createElement('div'); d.textContent=s??""; return d.innerHTML; }
 
+// Only used for the hero title, which intentionally supports basic styling
+// (<span> for the accent color, <br> for a line break). Anything else —
+// scripts, event handlers, other tags — is stripped before it ever
+// touches innerHTML, so an untrusted imported file can't inject code.
+function sanitizeTitleHTML(html){
+  const div = document.createElement('div');
+  div.innerHTML = html ?? "";
+  const allowed = new Set(['SPAN','BR']);
+  (function clean(node){
+    [...node.childNodes].forEach(child=>{
+      if(child.nodeType === 1){
+        if(!allowed.has(child.tagName)){
+          child.replaceWith(...child.childNodes);
+        }else{
+          [...child.attributes].forEach(a=>child.removeAttribute(a.name));
+          clean(child);
+        }
+      }
+    });
+  })(div);
+  return div.innerHTML;
+}
+
 /* =====================================================
    Render site from DATA
 ===================================================== */
@@ -479,7 +510,7 @@ function render(){
   // Hero
   const h = DATA.hero;
   document.getElementById('heroEyebrow').textContent = t(h.eyebrow);
-  document.getElementById('heroTitle').innerHTML = t(h.title); // owner-controlled, allows <span>/<br>
+  document.getElementById('heroTitle').innerHTML = sanitizeTitleHTML(t(h.title)); // sanitized: only <span>/<br> survive
   document.getElementById('heroSub').textContent = t(h.sub);
   document.getElementById('heroSide').innerHTML = `
     <div class="side-block"><h3>${esc(t(h.side1h))}</h3><p>${esc(t(h.side1p))}</p><a href="#about">${LABELS.learnMore[lang]}</a></div>
@@ -602,6 +633,9 @@ const loginOverlay = document.getElementById('loginOverlay');
 const pwInput = document.getElementById('pwInput');
 const pwErr = document.getElementById('pwErr');
 
+let failedAttempts = 0;
+let lockedUntil = 0;
+
 function openLogin(){
   pwInput.value = ""; pwErr.textContent = "";
   loginOverlay.classList.add('show');
@@ -612,12 +646,26 @@ loginOverlay.addEventListener('click', e=>{ if(e.target===loginOverlay) loginOve
 document.getElementById('pwGo').addEventListener('click', tryLogin);
 pwInput.addEventListener('keydown', e=>{ if(e.key==='Enter') tryLogin(); });
 
-function tryLogin(){
-  if(pwInput.value === ADMIN_PASS){
+async function tryLogin(){
+  const now = Date.now();
+  if(now < lockedUntil){
+    const secs = Math.ceil((lockedUntil-now)/1000);
+    pwErr.textContent = `Too many attempts. Try again in ${secs}s.`;
+    return;
+  }
+  const hash = await sha256(ADMIN_SALT + pwInput.value);
+  if(hash === ADMIN_HASH){
+    failedAttempts = 0;
     loginOverlay.classList.remove('show');
     openAdmin();
   }else{
-    pwErr.textContent = "Wrong key. Try again.";
+    failedAttempts++;
+    if(failedAttempts >= 5){
+      lockedUntil = Date.now() + 30000; // 30s lockout after 5 wrong tries
+      pwErr.textContent = "Too many attempts. Try again in 30s.";
+    }else{
+      pwErr.textContent = "Wrong key. Try again.";
+    }
     pwInput.value = "";
     pwInput.focus();
   }
@@ -891,11 +939,19 @@ document.getElementById('btnExport').addEventListener('click', ()=>{
 document.getElementById('btnImport').addEventListener('click', ()=> document.getElementById('importFile').click());
 document.getElementById('importFile').addEventListener('change', e=>{
   const f = e.target.files[0]; if(!f) return;
+  if(f.size > 2_000_000){ setStatus("⚠️ Import failed: file too large."); e.target.value=""; return; }
   const r = new FileReader();
   r.onload = ()=>{
     try{
       const parsed = JSON.parse(r.result);
-      if(!parsed.hero || !parsed.projects) throw new Error("Not a portfolio data file");
+      if(!parsed || typeof parsed !== 'object') throw new Error("Not a valid JSON object");
+      if(!parsed.hero || !Array.isArray(parsed.projects) || !Array.isArray(parsed.skills))
+        throw new Error("Not a portfolio data file");
+      // Hero title is the only field ever inserted as HTML — sanitize on the way in too.
+      if(parsed.hero.title){
+        parsed.hero.title.en = sanitizeTitleHTML(parsed.hero.title.en);
+        parsed.hero.title.ja = sanitizeTitleHTML(parsed.hero.title.ja);
+      }
       DATA = parsed; saveData(); render();
       DRAFT = JSON.parse(JSON.stringify(DATA)); buildTab();
       setStatus("✅ Imported and applied.");
