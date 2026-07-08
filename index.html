@@ -7,6 +7,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%A6%9D%3C/text%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700;800&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.js"></script>
 <style>
 :root{
   --bg:#0b0d10; --bg2:#101318; --panel:#151920;
@@ -293,12 +294,19 @@ footer{border-top:1px solid var(--line);padding:28px 0;color:var(--muted);font-s
 <div class="overlay" id="loginOverlay">
   <div class="modal">
     <h3>🦝 Admin Access</h3>
-    <p>Enter the owner key to open the admin panel.</p>
-    <input type="password" id="pwInput" inputmode="numeric" autocomplete="off" placeholder="••••••">
+    <p>Sign in with your admin account to edit this site.</p>
+    <div class="fgroup" style="text-align:left">
+      <label>Email</label>
+      <input type="email" id="emailInput" autocomplete="username" placeholder="you@example.com">
+    </div>
+    <div class="fgroup" style="text-align:left">
+      <label>Password</label>
+      <input type="password" id="pwInput" autocomplete="current-password" placeholder="••••••••" style="letter-spacing:normal;text-align:left">
+    </div>
     <div class="err" id="pwErr"></div>
     <div class="btn-row">
       <button class="btn" id="pwCancel">Cancel</button>
-      <button class="btn primary" id="pwGo">Unlock</button>
+      <button class="btn primary" id="pwGo">Sign in</button>
     </div>
   </div>
 </div>
@@ -328,18 +336,15 @@ footer{border-top:1px solid var(--line);padding:28px 0;color:var(--muted);font-s
 
 <script>
 /* =====================================================
-   Data — defaults. Live data is stored in localStorage
-   under 'ztt_portfolio' and edited via the admin panel.
+   Supabase — real backend. Content lives in the `portfolio`
+   table (row id=1, column `data` jsonb). Only a signed-in
+   admin (via Supabase Auth) can write; everyone can read.
 ===================================================== */
-// Password is stored as a salted SHA-256 hash, not plain text.
-// This isn't unbreakable (nothing client-side truly is) but stops
-// casual "view source" snooping from revealing the key directly.
-const ADMIN_SALT = "byte-akihiro-salt-2026";
-const ADMIN_HASH = "29bc617bb6ba80f98c9a5d19164a4b63af7410a3a095211f5bb99daa5f64f1f5";
-async function sha256(str){
-  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(str));
-  return Array.from(new Uint8Array(buf)).map(b=>b.toString(16).padStart(2,'0')).join('');
-}
+const SUPABASE_URL = "https://alvlzgkogyubpibuxlfi.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImFsdmx6Z2tvZ3l1YnBpYnV4bGZpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODM0NzAxNDYsImV4cCI6MjA5OTA0NjE0Nn0.DBSNSjO4TvaZ1jUsOBFcYVGt68ltk-9Ts8eYacaDuPo";
+const sb = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const PORTFOLIO_ROW_ID = 1;
+let isAdmin = false; // true only after a real Supabase login succeeds
 const STORE_KEY = "ztt_portfolio_v2";
 
 const DEFAULT_DATA = {
@@ -446,17 +451,23 @@ const DEFAULT_DATA = {
 };
 
 /* ---------- State ---------- */
-let DATA = loadData();
+let DATA = JSON.parse(JSON.stringify(DEFAULT_DATA)); // instant fallback while we fetch the real data
 let lang = localStorage.getItem('ztt_lang') || 'en';
 
-function loadData(){
+async function loadData(){
   try{
-    const raw = localStorage.getItem(STORE_KEY);
-    if(raw){ return JSON.parse(raw); }
-  }catch(e){ console.warn("Bad saved data, using defaults", e); }
+    const { data, error } = await sb.from('portfolio').select('data').eq('id', PORTFOLIO_ROW_ID).single();
+    if(error) throw error;
+    if(data && data.data) return data.data;
+  }catch(e){ console.warn("Couldn't load from Supabase, showing defaults", e); }
   return JSON.parse(JSON.stringify(DEFAULT_DATA));
 }
-function saveData(){ localStorage.setItem(STORE_KEY, JSON.stringify(DATA)); }
+async function saveData(){
+  if(!isAdmin){ console.warn("Not signed in — refusing to save."); return {ok:false, error:"Not signed in"}; }
+  const { error } = await sb.from('portfolio').upsert({ id: PORTFOLIO_ROW_ID, data: DATA });
+  if(error){ console.error(error); return {ok:false, error: error.message}; }
+  return {ok:true};
+}
 function t(obj){ return (obj && typeof obj === 'object') ? (obj[lang] ?? obj.en ?? "") : (obj ?? ""); }
 function esc(s){ const d=document.createElement('div'); d.textContent=s??""; return d.innerHTML; }
 
@@ -630,6 +641,7 @@ document.getElementById('stripLbl').addEventListener('click', ()=>{
 });
 
 const loginOverlay = document.getElementById('loginOverlay');
+const emailInput = document.getElementById('emailInput');
 const pwInput = document.getElementById('pwInput');
 const pwErr = document.getElementById('pwErr');
 
@@ -637,14 +649,15 @@ let failedAttempts = 0;
 let lockedUntil = 0;
 
 function openLogin(){
-  pwInput.value = ""; pwErr.textContent = "";
+  emailInput.value = ""; pwInput.value = ""; pwErr.textContent = "";
   loginOverlay.classList.add('show');
-  setTimeout(()=>pwInput.focus(), 60);
+  setTimeout(()=>emailInput.focus(), 60);
 }
 document.getElementById('pwCancel').addEventListener('click', ()=> loginOverlay.classList.remove('show'));
 loginOverlay.addEventListener('click', e=>{ if(e.target===loginOverlay) loginOverlay.classList.remove('show'); });
 document.getElementById('pwGo').addEventListener('click', tryLogin);
 pwInput.addEventListener('keydown', e=>{ if(e.key==='Enter') tryLogin(); });
+emailInput.addEventListener('keydown', e=>{ if(e.key==='Enter') pwInput.focus(); });
 
 async function tryLogin(){
   const now = Date.now();
@@ -653,9 +666,15 @@ async function tryLogin(){
     pwErr.textContent = `Too many attempts. Try again in ${secs}s.`;
     return;
   }
-  const hash = await sha256(ADMIN_SALT + pwInput.value);
-  if(hash === ADMIN_HASH){
+  pwErr.textContent = "Signing in…";
+  // Real authentication — checked by Supabase's servers, never visible in this file.
+  const { data, error } = await sb.auth.signInWithPassword({
+    email: emailInput.value.trim(),
+    password: pwInput.value
+  });
+  if(!error && data?.session){
     failedAttempts = 0;
+    isAdmin = true;
     loginOverlay.classList.remove('show');
     openAdmin();
   }else{
@@ -664,12 +683,16 @@ async function tryLogin(){
       lockedUntil = Date.now() + 30000; // 30s lockout after 5 wrong tries
       pwErr.textContent = "Too many attempts. Try again in 30s.";
     }else{
-      pwErr.textContent = "Wrong key. Try again.";
+      pwErr.textContent = "Wrong email or password. Try again.";
     }
     pwInput.value = "";
     pwInput.focus();
   }
 }
+
+// If the browser already has a valid Supabase session (e.g. page refresh
+// right after logging in), treat the visitor as admin automatically.
+sb.auth.getSession().then(({data})=>{ if(data?.session) isAdmin = true; });
 
 /* =====================================================
    Admin panel
@@ -907,7 +930,7 @@ function bindListButtons(){
 }
 
 /* ---- Save / export / import / reset ---- */
-document.getElementById('btnSave').addEventListener('click', ()=>{
+document.getElementById('btnSave').addEventListener('click', async ()=>{
   // normalize comma-separated helper fields
   DRAFT.projects.forEach(p=>{
     if(typeof p._tech === 'string'){ p.tech = p._tech.split(',').map(s=>s.trim()).filter(Boolean); }
@@ -918,9 +941,10 @@ document.getElementById('btnSave').addEventListener('click', ()=>{
   }
   delete DRAFT.strip._items;
   DATA = JSON.parse(JSON.stringify(DRAFT));
-  saveData();
+  setStatus("Saving…");
+  const res = await saveData();
   render();
-  setStatus("✅ Saved! The site is updated.");
+  setStatus(res.ok ? "✅ Saved! Live for everyone now." : ("⚠️ Save failed: " + res.error));
   // rebuild draft helper fields so panel keeps working
   DRAFT = JSON.parse(JSON.stringify(DATA));
   buildTab();
@@ -941,7 +965,7 @@ document.getElementById('importFile').addEventListener('change', e=>{
   const f = e.target.files[0]; if(!f) return;
   if(f.size > 2_000_000){ setStatus("⚠️ Import failed: file too large."); e.target.value=""; return; }
   const r = new FileReader();
-  r.onload = ()=>{
+  r.onload = async ()=>{
     try{
       const parsed = JSON.parse(r.result);
       if(!parsed || typeof parsed !== 'object') throw new Error("Not a valid JSON object");
@@ -952,22 +976,24 @@ document.getElementById('importFile').addEventListener('change', e=>{
         parsed.hero.title.en = sanitizeTitleHTML(parsed.hero.title.en);
         parsed.hero.title.ja = sanitizeTitleHTML(parsed.hero.title.ja);
       }
-      DATA = parsed; saveData(); render();
+      DATA = parsed;
+      const res = await saveData();
+      render();
       DRAFT = JSON.parse(JSON.stringify(DATA)); buildTab();
-      setStatus("✅ Imported and applied.");
+      setStatus(res.ok ? "✅ Imported and saved live." : ("⚠️ Imported locally, but save failed: " + res.error));
     }catch(err){ setStatus("⚠️ Import failed: " + err.message); }
   };
   r.readAsText(f);
   e.target.value = "";
 });
 
-document.getElementById('btnReset').addEventListener('click', ()=>{
-  if(confirm("Reset ALL content to the built-in defaults? Your saved edits will be removed.")){
-    localStorage.removeItem(STORE_KEY);
+document.getElementById('btnReset').addEventListener('click', async ()=>{
+  if(confirm("Reset ALL content to the built-in defaults? This updates the live site for everyone.")){
     DATA = JSON.parse(JSON.stringify(DEFAULT_DATA));
+    const res = await saveData();
     render();
     DRAFT = JSON.parse(JSON.stringify(DATA)); buildTab();
-    setStatus("Reset to defaults.");
+    setStatus(res.ok ? "Reset to defaults and saved live." : ("⚠️ Reset locally, but save failed: " + res.error));
   }
 });
 
@@ -1070,9 +1096,19 @@ bytePeek.addEventListener('click', ()=>{
 });
 
 /* ---------- Init ---------- */
-render();
-observeReveals();
-updatePeekFace();
+async function init(){
+  render();      // paint instantly with defaults so the page never looks empty
+  observeReveals();
+  updatePeekFace();
+
+  const { data: sessionData } = await sb.auth.getSession();
+  isAdmin = !!sessionData?.session;
+
+  DATA = await loadData();  // now fetch the real live content
+  render();
+  observeReveals();
+}
+init();
 
 </script>
 </body>
